@@ -1,11 +1,15 @@
-from fastapi import FastAPI, HTTPException, Depends, status, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, status, Request, Form, BackgroundTasks
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlmodel import Session, select, or_
+from sqlmodel import Session, select
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from datetime import datetime
-from typing import List
+import os
+import aiofiles
+import json
+import httpx
+from typing import Optional, List
 
 from database.session import get_session, create_tables
 from models.user import User, UserCreate, UserResponse
@@ -278,3 +282,108 @@ def toggle_user_activation(
     user.is_active = activate
     session.commit()
     return {"message": f"User {user.username} activation set to {activate}"}
+from fastapi import UploadFile, File, Form, Depends, HTTPException
+import aiofiles
+import os
+
+@app.post("/documents/upload")
+async def upload_document(
+    file: UploadFile = File(...),
+    city: str = Form(...),
+    description: str = Form(None)
+):
+    # Save uploaded file locally
+    os.makedirs("uploads", exist_ok=True)
+    file_path = f"uploads/{file.filename}"
+    
+    async with aiofiles.open(file_path, "wb") as out_file:
+        content = await file.read()
+        await out_file.write(content)
+
+    return {
+        "status": "enriched",
+        "filename": file.filename,
+        "city": city,
+        "description": description,
+        "message": "File uploaded successfully"
+    }
+# 1. LIST DOCUMENTS
+@app.get("/documents")
+def list_documents(
+    status: Optional[str] = None,
+    city: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    query = select(Document)
+    if current_user.role not in ["admin", "manager"]:
+        query = query.where(Document.uploader_id == current_user.id)
+    if status:
+        query = query.where(Document.status == status)
+    if city:
+        query = query.where(Document.city == city)
+    return session.exec(query).all()
+
+# 2. SEARCH DOCUMENTS (MUST BE ABOVE /{document_id}!)
+@app.get("/documents/search")
+def search_documents(
+    q: Optional[str] = None,
+    city: Optional[str] = None,
+    status: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    query = select(Document)
+    if current_user.role not in ["admin", "manager"]:
+        query = query.where(Document.uploader_id == current_user.id)
+    if city:
+        query = query.where(Document.city == city)
+    if status:
+        query = query.where(Document.status == status)
+    if q:
+        query = query.where(Document.original_filename.contains(q) | Document.description.contains(q))
+    
+    return session.exec(query).all()
+
+# 3. GET SPECIFIC DOCUMENT BY ID
+@app.get("/documents/{document_id}")
+def get_document(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    document = session.get(Document, document_id)
+    if not document:
+        raise HTTPException(404, "Document not found")
+    if current_user.role not in ["admin", "manager"] and document.uploader_id != current_user.id:
+        raise HTTPException(403, "Access denied")
+    return document
+# --- STEP 10: MANUAL ENRICHMENT TRIGGER ---
+@app.post("/documents/{document_id}/enrich")
+async def enrich_document(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """Manually trigger weather enrichment for a document (Managers & Admins only)."""
+    document = session.get(Document, document_id)
+    if not document:
+        raise HTTPException(404, "Document not found")
+        
+    if document.status == "enriched":
+        return {"message": "Document already enriched"}
+
+    weather_data = await get_weather(document.city, document.country)
+    if weather_data and "error" not in weather_data:
+        document.weather_data = json.dumps(weather_data)
+        document.weather_fetched_at = datetime.utcnow()
+        document.status = "enriched"
+        session.commit()
+        return {
+            "message": "Document enriched successfully",
+            "weather": weather_data
+        }
+    else:
+        document.status = "failed"
+        session.commit()
+        raise HTTPException(500, "Failed to enrich document with weather data")

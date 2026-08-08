@@ -1,7 +1,7 @@
-from sqlmodel import SQLModel, Field
+from sqlmodel import SQLModel, Field,Relationship
 from datetime import datetime
-from typing import Optional
-
+from typing import TYPE_CHECKING, Optional,List
+from models.document import Document
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(unique=True, index=True, min_length=3, max_length=50)
@@ -13,6 +13,7 @@ class User(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     last_login: Optional[datetime] = None
+    documents: List["Document"]=Relationship(back_populates="uploader")
 
 class UserCreate(SQLModel):
     username: str = Field(min_length=3, max_length=50)
